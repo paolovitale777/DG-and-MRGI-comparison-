@@ -1,0 +1,202 @@
+
+library(AlphaSimR)
+dir.create("output", showWarnings = FALSE)   # simulation outputs go here
+
+# Give your scenario a name
+scenarioName <- "Multitrait_DG_index_different_weights"
+source("scripts/sim_param_scenarios_1_2.R")
+source("scripts/MRGI_functions.R")   # stepInfo() for the selection log
+
+# Desired gains (Pesek & Baker 1969): b = G^-1 d, so the expected response
+# R = i * G b / sd(I) = (i / sd(I)) * d, i.e. gains proportional to d.
+desiredGains <- c(1, 0.1, 0.8, 0.1)   # relative desired gains (sign = direction)
+useSDunits   <- TRUE         # TRUE  = d is in genetic SD units of the base pop (end of burn-in)
+# FALSE = d is in trait units
+
+desiredGainsWeights <- function(G, d) {
+  G <- as.matrix(G)
+  as.vector(solve(G, d))     # = solve(G) %*% d, numerically more stable
+}
+
+# Loop over replicates
+for(REP in 1:nReps){
+  
+  ## Load data ----
+  load(paste0("output/Multitrait_burnIn",REP,".RData"))
+  
+  # Change scenario
+  output$scenario <- scenarioName
+
+  # Same seed for all four scenarios at a given rep: reproducible runs, and DG and MRGI
+  # start each rep from the same burn-in AND the same random stream (paired comparison)
+  set.seed(REP)
+  
+  # Breeding objective, fixed for the whole run and the same at every stage
+  G0 <- varG(mergePops(list(F5_YT, F6_EYT)))
+  d  <- if(useSDunits) desiredGains * sqrt(diag(G0)) else desiredGains
+  
+  # Headrows were never phenotyped in the burn-in: residual variance from H2_F5s
+  var_e_F4 <- var_e(varG(F4), H2_F5s)
+  F4 <- setPheno(F4, varE = var_e_F4, reps = 1)
+
+  selLog <- list()   # one row per selection step and year
+
+  # F6 (Elite Yield Trial) statistics: columns + value at the end of burn-in
+  recordF6 <- function(output, pop, yr) {
+    for(t in 1:nTraits){
+      output[[paste0("mean_F6_EYT_t",  t)]][yr] <- meanG(pop)[t]
+      output[[paste0("var_F6_EYT_t",   t)]][yr] <- varG(pop)[t, t]
+      output[[paste0("genic_F6_EYT_t", t)]][yr] <- genicVarG(pop)[t]
+    }
+    output
+  }
+  for(t in 1:nTraits) for(st in c("mean", "var", "genic"))
+    output[[paste0(st, "_F6_EYT_t", t)]] <- NA_real_
+  output <- recordF6(output, F6_EYT, nYearsBurnIn)
+  
+  ## Run the breeding program for (yearsTotal - nYearsBurnIn) = 25 years ----
+  for(year in (nYearsBurnIn + 1):yearsTotal){
+    
+    print(paste0("Multitrait_DG_index year ", year))
+    # select new parents in current year
+    
+    # select new parents in current year
+    # nParents <- sample(c(100:120), 1) #
+    parental_lines <- mergePops(list(F5_YT, F6_EYT))
+    b <- desiredGainsWeights(varG(parental_lines), d)
+    selLog[[length(selLog) + 1]] <- cbind(rep = REP, year = year,
+      stepInfo("DG", "parents", N = parental_lines@nInd, nInd = nParentsTotal, b = b,
+               G = varG(parental_lines), P = var(parental_lines@pheno), M = d))
+    
+    parent_selected <- selectInd(pop   = parental_lines,
+                                 nInd  = nParentsTotal,
+                                 trait = selIndex,
+                                 b     = b)
+    
+    
+    # Desired-gains weights with known (simulated) G of the stage
+    b <- desiredGainsWeights(varG(F6_EYT), d)
+    selLog[[length(selLog) + 1]] <- cbind(rep = REP, year = year,
+      stepInfo("DG", "F7", N = F6_EYT@nInd, nInd = n_Ind_F7_EYT, b = b,
+               G = varG(F6_EYT), P = varG(F6_EYT) + var_e_F6_EYT, M = d))
+    
+    F7_AdvEYT <- selectInd(pop = F6_EYT,
+                           nInd=n_Ind_F7_EYT,
+                           trait = selIndex,
+                           b=b)
+    
+    # F7: Advanced Elite Yield Trial
+    F7_AdvEYT <- self(F7_AdvEYT)
+    F7_AdvEYT <- setPheno(F7_AdvEYT,
+                          varE = var_e_F7_EYT,
+                          reps = 1)  #6*2,
+    
+    
+    
+    
+    # Desired-gains weights with known (simulated) G of the stage
+    b <- desiredGainsWeights(varG(F5_YT), d)
+    selLog[[length(selLog) + 1]] <- cbind(rep = REP, year = year,
+      stepInfo("DG", "F6", N = F5_YT@nInd, nInd = n_Ind_F6_EYT, b = b,
+               G = varG(F5_YT), P = varG(F5_YT) + var_e_F5_YT, M = d))
+    
+    
+    F6_EYT <- selectInd(pop = F5_YT,
+                        nInd=n_Ind_F6_EYT,
+                        trait = selIndex,
+                        b=b)
+    
+    
+    # F6: Elite Yield Trials
+    F6_EYT <- self(F6_EYT)
+    F6_EYT <- setPheno(F6_EYT,
+                       varE = var_e_F6_EYT,
+                       reps = 1)  # 6*2, # 4 locs, 2 reps, 1x plot size
+    
+    
+    # F5 - Obregon - season 6 (yr3)
+    b <- desiredGainsWeights(varG(F4), d)
+    selLog[[length(selLog) + 1]] <- cbind(rep = REP, year = year,
+      stepInfo("DG", "F5", N = F4@nInd, nInd = n_Ind_F5_YT, b = b,
+               G = varG(F4), P = varG(F4) + var_e_F4, M = d))
+    F5_YT <- selectInd(pop = F4,
+                       nInd = n_Ind_F5_YT,
+                       trait = selIndex,
+                       b = b)
+    F5_YT <- setPheno(F5_YT,
+                      varE = var_e_F5_YT,
+                      reps = 1)  #4*1, # 1 plot
+    
+    
+    #Headrows
+    F4 <- selectInd(DH, n_Ind_F4, use="rand")
+    F4 <- setPheno(F4, varE = var_e_F4, reps = 1)
+    
+    
+    DH=makeDH(F1,nDH)# only 100 needed under current simulation framework.
+    
+    # Crossing block (yr1)
+    F1 <- randCross(parent_selected,
+                    nCrosses = nCrossesBrnIn,
+                    nProgeny = 1)
+    
+    meanG(parent_selected)
+    # Report performance of new F1s
+    output$mean_parents_t1[year] <- meanG(parent_selected)[1]
+    output$mean_parents_t2[year] <- meanG(parent_selected)[2]
+    output$mean_parents_t3[year] <- meanG(parent_selected)[3]
+    output$mean_parents_t4[year] <- meanG(parent_selected)[4]
+    output$var_parents_t1[year] <- varG(parent_selected)[1]
+    output$var_parents_t2[year] <- varG(parent_selected)[2,2]
+    output$var_parents_t3[year] <- varG(parent_selected)[3,3]
+    output$var_parents_t4[year] <- varG(parent_selected)[4,4]
+    
+    # Report performance of new F8s
+    output <- recordF6(output, F6_EYT, year)   # F6 lines of this year
+
+    output$mean_F5_YT_t1[year] <- meanG(F5_YT)[1]
+    output$mean_F5_YT_t2[year] <- meanG(F5_YT)[2]
+    output$mean_F5_YT_t3[year] <- meanG(F5_YT)[3]
+    output$mean_F5_YT_t4[year] <- meanG(F5_YT)[4]
+    output$var_F5_YT_t1[year] <- varG(F5_YT)[1]
+    output$var_F5_YT_t2[year] <- varG(F5_YT)[2,2]
+    output$var_F5_YT_t3[year] <- varG(F5_YT)[3,3]
+    output$var_F5_YT_t4[year] <- varG(F5_YT)[4,4]
+    output$genic_F5_YT_t1[year] <- genicVarG(F5_YT)[1]
+    output$genic_F5_YT_t2[year] <- genicVarG(F5_YT)[2]
+    output$genic_F5_YT_t3[year] <- genicVarG(F5_YT)[3]
+    output$genic_F5_YT_t4[year] <- genicVarG(F5_YT)[4]
+    
+    
+    output$mean_F7_AdvEYT_t1[year] <- meanG(F7_AdvEYT)[1]
+    output$mean_F7_AdvEYT_t2[year] <- meanG(F7_AdvEYT)[2]
+    output$mean_F7_AdvEYT_t3[year] <- meanG(F7_AdvEYT)[3]
+    output$mean_F7_AdvEYT_t4[year] <- meanG(F7_AdvEYT)[4]
+    output$var_F7_AdvEYT_t1[year] <- varG(F7_AdvEYT)[1]
+    output$var_F7_AdvEYT_t2[year] <- varG(F7_AdvEYT)[2,2]
+    output$var_F7_AdvEYT_t3[year] <- varG(F7_AdvEYT)[3,3]
+    output$var_F7_AdvEYT_t4[year] <- varG(F7_AdvEYT)[4,4]
+    
+    output$genic_F7_AdvEYT_t1[year] <- genicVarG(F7_AdvEYT)[1]
+    output$genic_F7_AdvEYT_t2[year] <- genicVarG(F7_AdvEYT)[2]
+    output$genic_F7_AdvEYT_t3[year] <- genicVarG(F7_AdvEYT)[3]
+    output$genic_F7_AdvEYT_t4[year] <- genicVarG(F7_AdvEYT)[4]
+    
+    
+  }
+  
+  # Save output
+  cat(paste0("saving REP ", REP, "\n"))
+  saveRDS(output,paste0("output/", scenarioName,"_",REP,".rds"))
+  saveRDS(do.call(rbind, selLog), paste0("output/", scenarioName, "_selection_log_", REP, ".rds"))
+}
+
+
+# Record software versions used for these runs (AlphaSimR version changes the results)
+writeLines(capture.output(sessionInfo()), paste0("output/", scenarioName, "_sessionInfo.txt"))
+
+head(output)
+
+rm(list=ls())
+
+ls()
